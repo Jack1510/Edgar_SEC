@@ -1,14 +1,63 @@
-
 import streamlit as st
 from pathlib import Path
 import shutil
 import os
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from edgar_downloader import get_filing_types, download_edgar_filings
+from extract_financials import extract_financial_statements
 from mda_extractor import extract_mda_sections
 from mda_analyzer import analyze_mda_streamlit
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+def setup_session():
+    """Set up a requests session with proper headers and retry logic"""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[403, 404, 500, 502, 503, 504]
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    # SEC requires proper headers to avoid 403 errors
+    session.headers.update({
+        'User-Agent': 'Your Company Name your@email.com',
+        'Accept-Encoding': 'gzip, deflate',
+        'Host': 'www.sec.gov'
+    })
+    return session
+
+def get_cik_lookup(ticker):
+    """Get CIK number for a given ticker with error handling"""
+    session = setup_session()
+    try:
+        # First try the new API endpoint
+        url = "https://data.sec.gov/submissions/CIK0000000000.json"
+        response = session.get(url.replace("0000000000", ticker), timeout=10)
+        if response.status_code == 200:
+            return response.json().get('cik')
+        
+        # Fallback to old endpoint if new one fails
+        url = "https://www.sec.gov/files/company_tickers.json"
+        response = session.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            for entry in data.values():
+                if entry.get('ticker') == ticker.upper():
+                    return str(entry.get('cik')).zfill(10)
+    except Exception as e:
+        st.error(f"Error fetching CIK: {str(e)}")
+    return None
+# Streamlit App Config
+st.set_page_config(page_title="SEC Filings Explorer", layout="wide")
+st.title("📄 SEC Filings Data Extractor")
 
 def plot_comprehensive_analysis(df):
     """Plot all financial metrics in a comprehensive dashboard"""
@@ -20,30 +69,28 @@ def plot_comprehensive_analysis(df):
        
         fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
-       
-        ax1.plot(df.index, df['revenue_growth_pct'], marker='o', color='blue', label='Revenue Growth %')
-        ax1.set_title('Revenue Growth Trend', fontsize=12)
-        ax1.set_xlabel('Year')
-        ax1.set_ylabel('Growth Percentage')
-        ax1.grid(True, linestyle='--', alpha=0.6)
+        if 'revenue_growth_pct' in df.columns:
+            ax1.plot(df.index, df['revenue_growth_pct'], marker='o', color='blue', label='Revenue Growth %')
+            ax1.set_title('Revenue Growth Trend', fontsize=12)
+            ax1.set_xlabel('Year')
+            ax1.set_ylabel('Growth Percentage')
+            ax1.grid(True, linestyle='--', alpha=0.6)
         
-        
-        ax2.plot(df.index, df['net_margin_pct'], marker='s', color='green', label='Net Margin %')
-        if 'gross_margin_pct' in df.columns:
-            ax2.plot(df.index, df['gross_margin_pct'], marker='^', color='orange', label='Gross Margin %')
-        ax2.set_title('Profitability Trends', fontsize=12)
-        ax2.set_xlabel('Year')
-        ax2.set_ylabel('Margin Percentage')
-        ax2.legend()
-        ax2.grid(True, linestyle='--', alpha=0.6)
+        if 'net_margin_pct' in df.columns:
+            ax2.plot(df.index, df['net_margin_pct'], marker='s', color='green', label='Net Margin %')
+            if 'gross_margin_pct' in df.columns:
+                ax2.plot(df.index, df['gross_margin_pct'], marker='^', color='orange', label='Gross Margin %')
+            ax2.set_title('Profitability Trends', fontsize=12)
+            ax2.set_xlabel('Year')
+            ax2.set_ylabel('Margin Percentage')
+            ax2.legend()
+            ax2.grid(True, linestyle='--', alpha=0.6)
         
         st.pyplot(fig1)
         plt.close(fig1)
 
-        
         fig2, (ax3, ax4) = plt.subplots(1, 2, figsize=(16, 6))
         
-      
         if 'current_ratio' in df.columns:
             ax3.plot(df.index, df['current_ratio'], marker='o', color='purple', label='Current Ratio')
         if 'quick_ratio' in df.columns:
@@ -53,7 +100,6 @@ def plot_comprehensive_analysis(df):
         ax3.set_ylabel('Ratio Value')
         ax3.legend()
         ax3.grid(True, linestyle='--', alpha=0.6)
-        
         
         if 'rnd_to_revenue' in df.columns:
             ax4.plot(df.index, df['rnd_to_revenue'], marker='o', color='brown', label='R&D/Revenue')
@@ -68,9 +114,7 @@ def plot_comprehensive_analysis(df):
         st.pyplot(fig2)
         plt.close(fig2)
 
-        
         fig3, (ax5, ax6) = plt.subplots(1, 2, figsize=(16, 6))
-        
         
         if 'rnd_to_revenue' in df.columns:
             ax5.plot(df.index, df['rnd_to_revenue'], marker='o', color='navy', label='R&D/Revenue')
@@ -81,7 +125,6 @@ def plot_comprehensive_analysis(df):
         ax5.set_ylabel('Percentage of Revenue')
         ax5.legend()
         ax5.grid(True, linestyle='--', alpha=0.6)
-        
         
         if 'debt_to_equity' in df.columns:
             ax6.plot(df.index, df['debt_to_equity'], marker='o', color='darkred', label='Debt/Equity')
@@ -96,7 +139,6 @@ def plot_comprehensive_analysis(df):
         st.pyplot(fig3)
         plt.close(fig3)
 
-        
         if len(df) >= 3:
             fig4, ax7 = plt.subplots(figsize=(12, 8))
             metrics = [
@@ -122,12 +164,8 @@ def plot_comprehensive_analysis(df):
                 st.pyplot(fig4)
                 plt.close(fig4)
 
-
-st.set_page_config(page_title="SEC EDGAR Analyzer Pro", layout="wide")
-st.title("📊 Advanced SEC EDGAR Financial Analyzer")
-
-
-tab1, tab2, tab3 = st.tabs(["🔍 Data Collection", "📂 MD&A Extraction", "📈 Advanced Analysis"])
+# Main App
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Data Collection", "🌐 URL Fetcher", "📂 MD&A Extraction", "📈 Advanced Analysis", "Extract Financials"])
 
 with tab1:
     st.header("📦 SEC EDGAR Filings Downloader")
@@ -173,6 +211,63 @@ with tab1:
                     st.error(f"💥 Something went wrong:\n\n`{str(e)}`")
 
 with tab2:
+    st.header("🌐 SEC Filing URL Fetcher")
+    st.markdown("Get HTML URLs for 10-K and 10-Q filings")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        ticker_for_urls = st.text_input("Enter Ticker Symbol (e.g., AAPL)", key="html_url_ticker").strip().upper()
+        form_type = st.selectbox("Select Filing Type for URLs", ["10-K", "10-Q"], key="html_url_type")
+        url_years = st.slider("Number of Years to Search", 1, 10, 3, key="html_url_years")
+    
+    with col2:
+        st.markdown("### Base URL Configuration")
+        base_url = st.text_input(
+            "Enter Base URL for fetch_data.py",
+            value="https://www.sec.gov/Archives/edgar/data/",
+            key="base_url_input"
+        )
+
+    if st.button("🔎 Fetch Filing URLs", key="html_url_button"):
+        if not ticker_for_urls:
+            st.warning("⚠️ Please enter a ticker symbol.")
+        else:
+            try:
+                cik = get_cik_lookup(ticker_for_urls)
+                if not cik:
+                    st.error(f"❌ Could not find CIK for ticker {ticker_for_urls}")
+                else:
+                    session = setup_session()
+                    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+                    response = session.get(url, timeout=10)
+                    
+                    if response.status_code != 200:
+                        st.error("Failed to retrieve submission data.")
+                    else:
+                        data = response.json()
+                        filings = data.get("filings", {}).get("recent", {})
+                        urls = []
+                        for i in range(len(filings.get("form", []))):
+                            if filings["form"][i] == form_type:
+                                filing_date = filings["filingDate"][i]
+                                accession = filings["accessionNumber"][i].replace("-", "")
+                                url = f"{base_url}{str(int(cik))}/{accession}/{filings['primaryDocument'][i]}"
+                                urls.append((filing_date, url))
+
+                        if urls:
+                            df_urls = pd.DataFrame(urls, columns=["Filing Date", "Filing URL"])
+                            df_urls = df_urls.sort_values(by="Filing Date", ascending=False)
+                            df_urls = df_urls.head(url_years)  # Just get the top `url_years` entries
+                            st.dataframe(df_urls)
+                            st.success(f"✅ Found {len(df_urls)} filings.")
+                        else:
+                            st.warning("No matching filings found.")
+            except Exception as e:
+                st.error(f"❌ Error occurred while fetching URLs: {str(e)}")
+
+
+with tab3:
     st.header("🔍 Extract MD&A Sections")
     st.markdown("Upload HTML filings or use previously downloaded files to extract Management Discussion & Analysis (Item 7) sections.")
 
@@ -215,7 +310,7 @@ with tab2:
             else:
                 st.warning("⚠️ No MD&A sections found to extract.")
 
-with tab3:
+with tab4:
     st.header("Comprehensive Financial Analysis")
     st.markdown("""
     **Analyze multiple financial dimensions:**
@@ -247,25 +342,17 @@ with tab3:
             
             try:
                 with st.spinner("Performing comprehensive financial analysis..."):
-                    
                     df = analyze_mda_streamlit(str(temp_analyze_dir))
                     
                     if df is not None and not df.empty:
-                       
                         df.index = df.index.astype(str)
-                        
                         
                         with st.expander("View Raw Data"):
                             st.dataframe(df.style.format({
-                                'revenue_growth_pct': '{:.1f}%',
-                                'net_margin_pct': '{:.1f}%',
-                                'gross_margin_pct': '{:.1f}%',
-                                'current_ratio': '{:.2f}',
-                                'quick_ratio': '{:.2f}',
-                                'debt_to_equity': '{:.2f}',
-                                'rnd_to_revenue': '{:.2f}%'
+                                col: '{:.1f}%' if '%' in col else '{:.2f}' 
+                                for col in df.columns
+                                if df[col].dtype in ['float64', 'int64']
                             }))
-                        
                         
                         plot_comprehensive_analysis(df)
                     
@@ -276,3 +363,87 @@ with tab3:
                 st.error(f"Analysis failed: {str(e)}")
             finally:
                 shutil.rmtree(temp_analyze_dir)
+with tab5:
+    st.header("📊 Extract Financial Statements")
+    st.markdown("""
+    Upload HTML filings or use previously downloaded files to extract:
+    - Balance Sheet
+    - Income Statement
+    - Cash Flow Statement
+    """)
+
+    # File upload section
+    uploaded_files = st.file_uploader(
+        "Upload HTML filings", 
+        type=["html", "htm"], 
+        accept_multiple_files=True, 
+        key="upload_financials"
+    )
+    
+    # Path selection section
+    st.markdown("### OR Use Existing Files")
+    existing_path = st.text_input(
+        "Path to downloaded filings (e.g., 'sec_data/AAPL/10-K')",
+        value="sec_data/AAPL/10-K",
+        key="existing_financial_path"
+    )
+    
+    if st.button("Extract Financial Statements", key="extract_financials_button"):
+        if not uploaded_files and not existing_path:
+            st.warning("⚠️ Please upload files or provide a path to existing files.")
+        else:
+            financial_output_dir = "extracted_financials"
+            
+            # Clear existing output directory
+            if os.path.exists(financial_output_dir):
+                shutil.rmtree(financial_output_dir)
+            os.makedirs(financial_output_dir, exist_ok=True)
+            
+            extracted_count = 0
+            
+            # Process uploaded files
+            if uploaded_files:
+                temp_dir = Path("temp_financial_uploads")
+                temp_dir.mkdir(exist_ok=True)
+                
+                for uploaded_file in uploaded_files:
+                    file_path = temp_dir / uploaded_file.name
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                
+                extracted_count += extract_financial_statements(str(temp_dir), financial_output_dir)
+                shutil.rmtree(temp_dir)
+            
+            # Process existing files
+            if existing_path and os.path.exists(existing_path):
+                extracted_count += extract_financial_statements(existing_path, financial_output_dir)
+            
+            # Display results
+            if extracted_count > 0:
+                st.success(f"✅ Extracted financial data from {extracted_count} file(s).")
+                
+                # Create zip archive of extracted data
+                zip_path = shutil.make_archive("financial_statements", 'zip', financial_output_dir)
+                
+                # Show download button and preview
+                with open(zip_path, "rb") as f:
+                    st.download_button(
+                        label="⬇️ Download Extracted Financials",
+                        data=f,
+                        file_name="financial_statements.zip",
+                        mime="application/zip",
+                        key="download_financials"
+                    )
+                
+                # Show preview of extracted files
+                st.markdown("### Extracted Files Preview")
+                extracted_files = list(Path(financial_output_dir).glob("*.csv"))
+                if extracted_files:
+                    sample_file = extracted_files[0]
+                    df = pd.read_csv(sample_file)
+                    st.write(f"Sample from {sample_file.name}:")
+                    st.dataframe(df.head())
+                else:
+                    st.warning("No CSV files were created during extraction.")
+            else:
+                st.warning("⚠️ No financial statements found to extract.")
