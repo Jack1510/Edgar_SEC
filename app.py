@@ -9,52 +9,124 @@ from edgar_downloader import get_filing_types, download_edgar_filings
 from extract_financials import extract_financial_statements
 from mda_extractor import extract_mda_sections
 from mda_analyzer import analyze_mda_streamlit
-
+from datetime import datetime, timedelta
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
 def setup_session():
-    """Set up a requests session with proper headers and retry logic"""
+    """Set up a requests session with the appropriate headers"""
     session = requests.Session()
-    retry = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[403, 404, 500, 502, 503, 504]
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    # SEC requires proper headers to avoid 403 errors
-    session.headers.update({
-        'User-Agent': 'Your Company Name your@email.com',
-        'Accept-Encoding': 'gzip, deflate',
-        'Host': 'www.sec.gov'
-    })
+    session.headers.update({'User-Agent': 'aman.wadgaonkar@gmail.com'})
     return session
 
 def get_cik_lookup(ticker):
-    """Get CIK number for a given ticker with error handling"""
+    """Get CIK from ticker using SEC API"""
+    ticker = ticker.upper()
     session = setup_session()
-    try:
-        # First try the new API endpoint
-        url = "https://data.sec.gov/submissions/CIK0000000000.json"
-        response = session.get(url.replace("0000000000", ticker), timeout=10)
-        if response.status_code == 200:
-            return response.json().get('cik')
+    url = f"https://www.sec.gov/files/company_tickers.json"
+    
+    response = session.get(url)
+    if response.status_code != 200:
+        st.error(f"Failed to access SEC API: {response.status_code}")
+        return None
         
-        # Fallback to old endpoint if new one fails
-        url = "https://www.sec.gov/files/company_tickers.json"
-        response = session.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            for entry in data.values():
-                if entry.get('ticker') == ticker.upper():
-                    return str(entry.get('cik')).zfill(10)
-    except Exception as e:
-        st.error(f"Error fetching CIK: {str(e)}")
+    data = response.json()
+    
+    # The company_tickers.json file contains a dictionary with numerical keys
+    for entry in data.values():
+        if entry['ticker'] == ticker:
+            cik = str(entry['cik_str']).zfill(10)
+            return cik
+    
     return None
+
+def get_filing_urls(ticker, form_type, years_back=5):
+    """Get URLs for 10-K or 10-Q filings"""
+    try:
+        cik = get_cik_lookup(ticker)
+        if not cik:
+            return []
+            
+        session = setup_session()
+        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        response = session.get(url)
+        
+        if response.status_code != 200:
+            st.error(f"Failed to retrieve submission data: {response.status_code}")
+            return []
+            
+        data = response.json()
+        filings = data.get("filings", {}).get("recent", {})
+        cutoff_date = (datetime.now() - timedelta(days=365 * years_back)).strftime('%Y-%m-%d')
+        
+        results = []
+        for i in range(len(filings.get("form", []))):
+            if filings["form"][i] == form_type:
+                filing_date = filings["filingDate"][i]
+                
+                # Skip if filing is older than cutoff
+                if filing_date < cutoff_date:
+                    continue
+                    
+                accession = filings["accessionNumber"][i].replace("-", "")
+                
+                # If primaryDocument is available, use it
+                if "primaryDocument" in filings and i < len(filings["primaryDocument"]):
+                    doc_name = filings["primaryDocument"][i]
+                    if doc_name:  # Only use if not empty
+                        url = f"https://www.sec.gov/Archives/edgar/data/{str(int(cik))}/{accession}/{doc_name}"
+                        results.append((filing_date, url))
+                        continue
+                
+                # Otherwise, get the main document from index.json
+                try:
+                    doc_url = get_10k_html_url(int(cik), accession)
+                    if doc_url:
+                        results.append((filing_date, doc_url))
+                except Exception as e:
+                    st.warning(f"Could not fetch document URL for {filing_date} filing: {str(e)}")
+        
+        return results
+    except Exception as e:
+        st.error(f"Error in fetching filing URLs: {str(e)}")
+        return []
+
+def get_10k_html_url(cik, accession):
+    """Get the HTML URL for a specific filing document"""
+    session = setup_session()
+    url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
+    response = session.get(url)
+    
+    if response.status_code != 200:
+        return None
+        
+    data = response.json()
+    files = data.get('directory', {}).get('item', [])
+    
+    # Find the main document
+    main_docs = []
+    for file in files:
+        name = file.get('name', '').lower()
+        if name.endswith('.htm') or name.endswith('.html'):
+            # Add to list with priority
+            priority = 1
+            if '10k' in name or '10-k' in name or '10q' in name or '10-q' in name:
+                priority = 0
+            main_docs.append((priority, name))
+    
+    # Sort by priority (0 = highest)
+    main_docs.sort()
+    
+    if not main_docs:
+        return None
+    
+    # Get the highest priority document
+    main_doc = main_docs[0][1]
+    file_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{main_doc}"
+    return file_url
+
 # Streamlit App Config
 st.set_page_config(page_title="SEC Filings Explorer", layout="wide")
 st.title("📄 SEC Filings Data Extractor")
@@ -233,39 +305,25 @@ with tab2:
         if not ticker_for_urls:
             st.warning("⚠️ Please enter a ticker symbol.")
         else:
-            try:
-                cik = get_cik_lookup(ticker_for_urls)
-                if not cik:
-                    st.error(f"❌ Could not find CIK for ticker {ticker_for_urls}")
-                else:
-                    session = setup_session()
-                    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-                    response = session.get(url, timeout=10)
+            with st.spinner(f"Fetching {form_type} filings for {ticker_for_urls}..."):
+                urls = get_filing_urls(ticker_for_urls, form_type, url_years)
+                
+                if urls:
+                    df_urls = pd.DataFrame(urls, columns=["Filing Date", "Filing URL"])
+                    df_urls = df_urls.sort_values(by="Filing Date", ascending=False)
                     
-                    if response.status_code != 200:
-                        st.error("Failed to retrieve submission data.")
-                    else:
-                        data = response.json()
-                        filings = data.get("filings", {}).get("recent", {})
-                        urls = []
-                        for i in range(len(filings.get("form", []))):
-                            if filings["form"][i] == form_type:
-                                filing_date = filings["filingDate"][i]
-                                accession = filings["accessionNumber"][i].replace("-", "")
-                                url = f"{base_url}{str(int(cik))}/{accession}/{filings['primaryDocument'][i]}"
-                                urls.append((filing_date, url))
-
-                        if urls:
-                            df_urls = pd.DataFrame(urls, columns=["Filing Date", "Filing URL"])
-                            df_urls = df_urls.sort_values(by="Filing Date", ascending=False)
-                            df_urls = df_urls.head(url_years)  # Just get the top `url_years` entries
-                            st.dataframe(df_urls)
-                            st.success(f"✅ Found {len(df_urls)} filings.")
-                        else:
-                            st.warning("No matching filings found.")
-            except Exception as e:
-                st.error(f"❌ Error occurred while fetching URLs: {str(e)}")
-
+                    # Add button to copy URLs to clipboard
+                    if not df_urls.empty:
+                        st.dataframe(df_urls)
+                        st.download_button(
+                            label="📥 Download URLs as CSV",
+                            data=df_urls.to_csv(index=False),
+                            file_name=f"{ticker_for_urls}_{form_type}_urls.csv",
+                            mime="text/csv"
+                        )
+                    st.success(f"✅ Found {len(df_urls)} {form_type} filings for {ticker_for_urls}.")
+                else:
+                    st.warning(f"No {form_type} filings found for {ticker_for_urls} in the last {url_years} years.")
 
 with tab3:
     st.header("🔍 Extract MD&A Sections")
