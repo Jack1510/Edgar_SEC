@@ -14,6 +14,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from sec_xbrl_processor import add_tab6
+
 
 def setup_session():
     """Set up a requests session with the appropriate headers"""
@@ -237,7 +239,7 @@ def plot_comprehensive_analysis(df):
                 plt.close(fig4)
 
 # Main App
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Data Collection", "🌐 URL Fetcher", "📂 MD&A Extraction", "📈 Advanced Analysis", "Extract Financials"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 Data Collection", "🌐 URL Fetcher", "📂 MD&A Extraction", "📈 Advanced Analysis", "Extract Financials", "XBRL Processing"])
 
 with tab1:
     st.header("📦 SEC EDGAR Filings Downloader")
@@ -505,3 +507,20 @@ with tab5:
                     st.warning("No CSV files were created during extraction.")
             else:
                 st.warning("⚠️ No financial statements found to extract.")
+with tab6:
+    add_tab6()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
